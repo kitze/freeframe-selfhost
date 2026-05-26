@@ -1,0 +1,170 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: freeframe
+      POSTGRES_PASSWORD: ${FREEFRAME_POSTGRES_PASSWORD}
+      POSTGRES_DB: freeframe
+    volumes:
+      - freeframe-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U freeframe -d freeframe"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: sh -c 'redis-server --requirepass "$$REDIS_PASSWORD" --appendonly yes'
+    environment:
+      REDIS_PASSWORD: ${FREEFRAME_REDIS_PASSWORD}
+    volumes:
+      - freeframe-redis-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" --no-auth-warning ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile.prod
+    environment:
+      DATABASE_URL: postgresql://freeframe:${FREEFRAME_POSTGRES_PASSWORD}@postgres:5432/freeframe
+      REDIS_URL: redis://:${FREEFRAME_REDIS_PASSWORD}@redis:6379/0
+      JWT_SECRET: ${FREEFRAME_JWT_SECRET}
+      FRONTEND_URL: https://${FREEFRAME_DOMAIN}
+      S3_STORAGE: minio
+      S3_BUCKET: freeframe
+      S3_ENDPOINT: https://frame-storage.server.kitze.io
+      S3_PUBLIC_ENDPOINT: https://frame-storage.server.kitze.io
+      S3_ACCESS_KEY: ${FREEFRAME_S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${FREEFRAME_S3_SECRET_KEY}
+      S3_REGION: us-east-1
+      MAIL_PROVIDER: smtp
+      MAIL_FROM_ADDRESS: freeframe@server.kitze.io
+      MAIL_FROM_NAME: FreeFrame
+      TRANSCODING_CONCURRENCY: 2
+      EMAIL_CONCURRENCY: 1
+      DISABLE_DOCS: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: sh -c "cd /workspace/apps/api && alembic upgrade head && cd /workspace && gunicorn apps.api.main:app -w 4 -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:8000 --timeout 120 --graceful-timeout 30"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 40s
+      retries: 5
+    labels:
+      - traefik.enable=true
+      - traefik.http.middlewares.freeframe-gzip.compress=true
+      - traefik.http.middlewares.freeframe-redirect.redirectscheme.scheme=https
+      - traefik.http.middlewares.freeframe-strip-api.stripprefix.prefixes=/api
+      - traefik.http.routers.freeframe-api-http.entryPoints=http
+      - traefik.http.routers.freeframe-api-http.rule=Host(`${FREEFRAME_DOMAIN}`) && PathPrefix(`/api`)
+      - traefik.http.routers.freeframe-api-http.middlewares=freeframe-redirect
+      - traefik.http.routers.freeframe-api-http.service=freeframe-api-http
+      - traefik.http.routers.freeframe-api-https.entryPoints=https
+      - traefik.http.routers.freeframe-api-https.rule=Host(`${FREEFRAME_DOMAIN}`) && PathPrefix(`/api`)
+      - traefik.http.routers.freeframe-api-https.middlewares=freeframe-strip-api,freeframe-gzip
+      - traefik.http.routers.freeframe-api-https.service=freeframe-api-https
+      - traefik.http.routers.freeframe-api-https.tls=true
+      - traefik.http.routers.freeframe-api-https.tls.certresolver=letsencrypt
+      - traefik.http.routers.freeframe-api-https.priority=100
+      - traefik.http.services.freeframe-api-http.loadbalancer.server.port=8000
+      - traefik.http.services.freeframe-api-https.loadbalancer.server.port=8000
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile.prod
+    environment:
+      DATABASE_URL: postgresql://freeframe:${FREEFRAME_POSTGRES_PASSWORD}@postgres:5432/freeframe
+      REDIS_URL: redis://:${FREEFRAME_REDIS_PASSWORD}@redis:6379/0
+      JWT_SECRET: ${FREEFRAME_JWT_SECRET}
+      FRONTEND_URL: https://${FREEFRAME_DOMAIN}
+      S3_STORAGE: minio
+      S3_BUCKET: freeframe
+      S3_ENDPOINT: https://frame-storage.server.kitze.io
+      S3_PUBLIC_ENDPOINT: https://frame-storage.server.kitze.io
+      S3_ACCESS_KEY: ${FREEFRAME_S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${FREEFRAME_S3_SECRET_KEY}
+      S3_REGION: us-east-1
+      TRANSCODING_CONCURRENCY: 2
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: sh -c "celery -A apps.api.tasks.celery_app worker -Q transcoding -c 2 --loglevel=warning"
+    restart: unless-stopped
+
+  beat:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile.prod
+    environment:
+      DATABASE_URL: postgresql://freeframe:${FREEFRAME_POSTGRES_PASSWORD}@postgres:5432/freeframe
+      REDIS_URL: redis://:${FREEFRAME_REDIS_PASSWORD}@redis:6379/0
+      JWT_SECRET: ${FREEFRAME_JWT_SECRET}
+      FRONTEND_URL: https://${FREEFRAME_DOMAIN}
+      S3_STORAGE: minio
+      S3_BUCKET: freeframe
+      S3_ENDPOINT: https://frame-storage.server.kitze.io
+      S3_PUBLIC_ENDPOINT: https://frame-storage.server.kitze.io
+      S3_ACCESS_KEY: ${FREEFRAME_S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${FREEFRAME_S3_SECRET_KEY}
+      S3_REGION: us-east-1
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: sh -c "celery -A apps.api.tasks.celery_app beat --loglevel=warning -s /tmp/celerybeat-schedule"
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ./apps/web
+      dockerfile: Dockerfile.prod
+      args:
+        NEXT_PUBLIC_API_URL: /api
+    environment:
+      NEXT_PUBLIC_API_URL: /api
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:3000"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 5
+    labels:
+      - traefik.enable=true
+      - traefik.http.middlewares.freeframe-gzip.compress=true
+      - traefik.http.middlewares.freeframe-redirect.redirectscheme.scheme=https
+      - traefik.http.routers.freeframe-web-http.entryPoints=http
+      - traefik.http.routers.freeframe-web-http.rule=Host(`${FREEFRAME_DOMAIN}`) && PathPrefix(`/`)
+      - traefik.http.routers.freeframe-web-http.middlewares=freeframe-redirect
+      - traefik.http.routers.freeframe-web-http.service=freeframe-web-http
+      - traefik.http.routers.freeframe-web-https.entryPoints=https
+      - traefik.http.routers.freeframe-web-https.rule=Host(`${FREEFRAME_DOMAIN}`) && PathPrefix(`/`)
+      - traefik.http.routers.freeframe-web-https.middlewares=freeframe-gzip
+      - traefik.http.routers.freeframe-web-https.service=freeframe-web-https
+      - traefik.http.routers.freeframe-web-https.tls=true
+      - traefik.http.routers.freeframe-web-https.tls.certresolver=letsencrypt
+      - traefik.http.routers.freeframe-web-https.priority=1
+      - traefik.http.services.freeframe-web-http.loadbalancer.server.port=3000
+      - traefik.http.services.freeframe-web-https.loadbalancer.server.port=3000
+    restart: unless-stopped
+
+volumes:
+  freeframe-postgres-data:
+  freeframe-redis-data:
