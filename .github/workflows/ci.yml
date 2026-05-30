@@ -30,7 +30,7 @@ jobs:
   # ─── Backend ──────────────────────────────────────────────────────────────────
   backend-test:
     name: Backend Tests
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, macOS, ARM64]
     defaults:
       run:
         working-directory: .
@@ -111,7 +111,7 @@ jobs:
   # ─── Frontend ─────────────────────────────────────────────────────────────────
   frontend-build:
     name: Frontend Build
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, macOS, ARM64]
     defaults:
       run:
         working-directory: apps/web
@@ -176,7 +176,7 @@ jobs:
   # ─── Lint ─────────────────────────────────────────────────────────────────────
   lint:
     name: Lint
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, macOS, ARM64]
 
     steps:
       - uses: actions/checkout@v6
@@ -216,7 +216,7 @@ jobs:
   # ─── Docker Build ─────────────────────────────────────────────────────────────
   docker-build:
     name: Docker Build
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, macOS, ARM64]
 
     steps:
       - uses: actions/checkout@v6
